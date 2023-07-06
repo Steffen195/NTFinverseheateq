@@ -1,12 +1,11 @@
-
+import torch.nn as nn
+import torch
 
 
 class Net(nn.Module):
     def __init__(self):
         super().__init__()
-        ##############
-        ##############
-
+        
         self.model = nn.Sequential(
             nn.Linear(2, 40),
             nn.Tanh(),
@@ -25,15 +24,7 @@ class Net(nn.Module):
             nn.Linear(40, 3)
         )
 
-        ##############
-        ##############
 
     def forward(self, x):
-        ##############
-        ##############
-
         x = self.model(x)
-
-        ##############
-        ##############
         return x

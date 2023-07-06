@@ -73,12 +73,13 @@ def temperature_simulation():
     t_final = 1
     time_steps = 500
     dt = (t_final - t0) / time_steps
-    t = np.linspace(t0, t_final, time_steps)
+    t = np.linspace(t0, t_final, time_steps).T
+
 
     # Source term. Each element i is the source at time t_i
     source_strength = np.ones(time_steps) * 1
     source_location = int(np.floor(grid_size / 2)-1)
-    print(source_location)
+    
 
     # Perform stability analysis
     stability_analysis(conductivity, dx, dt)
