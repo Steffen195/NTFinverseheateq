@@ -3,25 +3,31 @@ import torch
 
 
 class Net(nn.Module):
-    def __init__(self):
+    def __init__(self,hparam):
         super().__init__()
-        
+        self.hparam = hparam
         self.model = nn.Sequential(
-            nn.Linear(2, 40),
-            nn.Tanh(),
-            nn.Linear(40, 80),
-            nn.Tanh(),
-            nn.Linear(80, 100),
-            nn.Tanh(),
-            nn.Linear(100, 100),
-            nn.Tanh(),
-            nn.Linear(100, 100),
-            nn.Tanh(),
-            nn.Linear(100, 80),
-            nn.Tanh(),
-            nn.Linear(80, 40),
-            nn.Tanh(),
-            nn.Linear(40, 3)
+            nn.Linear(3, 80),
+            nn.ReLU(),
+            nn.Linear(80, 80),
+            nn.ReLU(),
+            nn.Linear(80, 80),
+            nn.ReLU(),
+            nn.Linear(80, 80),
+            nn.ReLU(),
+            nn.Linear(80, 80),
+            nn.ReLU(),
+            nn.Linear(80, 80),
+            nn.ReLU(),
+            nn.Linear(80, 80),
+            nn.ReLU(),
+            nn.Linear(80, 80),
+            nn.ReLU(),
+            nn.Linear(80, 80),
+            nn.ReLU(),
+            nn.Linear(80, 80),
+            nn.ReLU(),
+            nn.Linear(80, 1)
         )
 
 

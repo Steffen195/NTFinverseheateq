@@ -64,14 +64,14 @@ def temperature_simulation():
     # Set up the grid
     x_left_boundary = 0
     x_right_boundary = 1
-    grid_size = 50
+    grid_size = 100
     dx = (x_right_boundary - x_left_boundary) / grid_size
     x = np.linspace(x_left_boundary, x_right_boundary, grid_size)
 
     # Set up the time grid
     t0 = 0
     t_final = 1
-    time_steps = 500
+    time_steps = 1000
     dt = (t_final - t0) / time_steps
     t = np.linspace(t0, t_final, time_steps).T
 
@@ -92,7 +92,7 @@ def temperature_simulation():
 
     # Boundary Conditions
     T_left = 5
-    T_right = 20
+    T_right = 5
 
     T[0, :] = T_left
     T[-1, :] = T_right
@@ -107,19 +107,22 @@ def temperature_simulation():
             source_strength, time_index, source_location, grid_size)
         T[:, time_index] = (identity + A) @ T[:, time_index-1] + b_vector
 
-    return x, t, T, source_strength
+    return x, t, T, source_location, source_strength
 
 
 def return_data():
-    x, t, T, source_strength = temperature_simulation()
+    x, t, T,source_location, source_strength = temperature_simulation()
     # Extract Sensor Data
-    sensor_location = [0.25, 0.5, 0.75]
+
+    
+    #Select every fifth entry in the x array
+    sensor_location = x[::25]
     sensor_location_index = [int(np.floor(i * len(x)))
                              for i in sensor_location]
 
     sensor_data = extract_sensor_data(T, sensor_location_index)
 
-    return t, sensor_data, sensor_location, source_strength
+    return x,t, T, sensor_data, sensor_location, source_location,source_strength
 
 def plot_heat_map(x,t,T):
     # Plot the results in heat map
@@ -134,7 +137,7 @@ def plot_heat_map(x,t,T):
 
 
 def main():
-    x,t,T,_ = temperature_simulation()
+    x,t,T,_,_ = temperature_simulation()
     # Plot the results in heat map
     plot_heat_map(x,t,T)
 
