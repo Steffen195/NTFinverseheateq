@@ -30,7 +30,7 @@ def create_test_data(x,t,source_strength,source_location):
 
 
 
-def reshape_data(t,sensor_data, sensor_location,source_strength):
+def reshape_data(t,sensor_data, sensor_location,source_strength,source_location):
     # Input is an array with N_sensors*timesteps rows and 2 columns (time and sensor location)
     # Output is an array with N_sensors*timesteps rows and 1 column (sensor temperature data)
 
@@ -46,7 +46,7 @@ def reshape_data(t,sensor_data, sensor_location,source_strength):
         x_sensor = sensor_location[i]*np.ones(timesteps)
         x_sensor = x_sensor.reshape(timesteps,1)
 
-        if i == 1:
+        if sensor_location[i] == source_location:
             source = source_strength
         else:
             source = np.zeros_like(t)
@@ -112,7 +112,7 @@ def train_model():
     
     # Get the data and reshape it into the correct format. 
     x, t, temperature_field, sensor_data, sensor_location, source_location, source_strength = return_data()
-    input, output = reshape_data(t,sensor_data, sensor_location,source_strength)
+    input, output = reshape_data(t,sensor_data, sensor_location,source_strength,source_location)
     input.requires_grad = True
     input = input.to(device)
     output = output.to(device)
