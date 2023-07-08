@@ -77,7 +77,7 @@ def temperature_simulation():
 
 
     # Source term. Each element i is the source at time t_i
-    source_strength = np.ones(time_steps) * 1
+    source_strength = np.ones(time_steps)* 100
     source_location = int(np.floor(grid_size / 2)-1)
     
 

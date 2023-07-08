@@ -7,7 +7,7 @@ class Net(nn.Module):
         super().__init__()
         self.hparam = hparam
         self.model = nn.Sequential(
-            nn.Linear(3, 100),
+            nn.Linear(2, 100),
             nn.LeakyReLU(),
             nn.Linear(100, 200),
             nn.LeakyReLU(),
@@ -17,7 +17,7 @@ class Net(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(200, 100),
             nn.LeakyReLU(),
-            nn.Linear(100, 1)
+            nn.Linear(100, 2)
         )
 
 

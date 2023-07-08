@@ -14,20 +14,12 @@ import matplotlib.pyplot as plt
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print('You are using the following device: ', device)
 
-def create_test_data(x,t,source_strength,source_location):
+def create_test_data(x,t):
 
     input_test = np.array(np.meshgrid(t,x)).T.reshape(-1,2)
-    test_source = np.zeros((np.shape(input_test)[0],1))
-    for i in range(len(input_test)-1):
-        if input_test[i,1] == source_location:
-            test_source[i] = source_strength(np.where(t==input_test[i,0]))
-
-    input_test = np.hstack((input_test, test_source))
     input_test = torch.Tensor(input_test)
 
     return input_test
-
-
 
 
 def reshape_data(t,sensor_data, sensor_location,source_strength,source_location):
@@ -46,20 +38,21 @@ def reshape_data(t,sensor_data, sensor_location,source_strength,source_location)
         x_sensor = sensor_location[i]*np.ones(timesteps)
         x_sensor = x_sensor.reshape(timesteps,1)
 
-        if sensor_location[i] == source_location:
-            source = source_strength
-        else:
-            source = np.zeros_like(t)
-
-        arr = np.hstack((t, x_sensor,source))
+        arr = np.hstack((t, x_sensor))
 
         if input is None:
             input = arr
         else:
             input = np.vstack((input, arr))
 
+        if sensor_location[i] == source_location:
+            source = source_strength
+        else:
+            source = np.zeros_like(t)
+
         #Concatenation of sensor data into one output array
         data = sensor_data[i,:].reshape(timesteps,1)
+        data = np.hstack((data, source))
         if output is None:
             output = data
         else:
@@ -93,21 +86,19 @@ def loss_function(T_pred, output, T_t, T_xx, source_strength, hparam,T_0,T_left,
     physical_loss = torch.mean((T_t - 0.05*T_xx - source_strength)**2)
 
     # Data Loss
-    data_loss = torch.mean((T_pred - output)**2)
+    data_loss = torch.mean((T_pred - output[:,0])**2)
 
     initial_loss = torch.mean((T_0 - T_NN_0)**2)
 
-    boundary_loss = torch.mean(((T_left - T_NN_left) + (T_right-T_NN_left))**2)
+    boundary_loss = torch.mean(((T_left - T_NN_left) + (T_right-T_NN_right))**2)
 
     # Total Loss
-    #print("Physical loss: ", physical_loss) 
-    #print("Data loss: ", data_loss)
     loss = hparam["weight_data"]*data_loss+hparam["weight_physical"]*physical_loss + hparam["weight_boundary"]*boundary_loss + hparam["weight_initial"]*initial_loss
     return loss
 
 def train_model():
     # setting the hyperparameters
-    hparam = {"learning_rate": 0.01,"epochs": 5, "weight_physical":0.01, "weight_data":3,
+    hparam = {"learning_rate": 0.01,"epochs": 5, "weight_physical":0.1, "weight_data":3,
               "weight_boundary":1,"weight_initial":1,"batch_size_physical": 200}
     
     # Get the data and reshape it into the correct format. 
@@ -118,7 +109,7 @@ def train_model():
     output = output.to(device)
 
 
-    input_test = create_test_data(x,t,source_strength,source_location)
+    input_test = create_test_data(x,t)
     input_test.requires_grad = True
     input_test = input_test.to(device)
     # Create torch dataset from the input_test data with no output
@@ -137,31 +128,25 @@ def train_model():
     path = os.path.join(path, f'run_{num_of_runs + 1}')
     tb_logger = SummaryWriter(path)
     
-    
-    
-
     losses = np.zeros(hparam["epochs"])
-    # Get validation data by drawing random samples from the full temperature field
 
     # Instantiate the model, optimizer, data loaders and loss function
     model = Net(hparam).to(device)
     optimizer = Adam(model.parameters(), lr=hparam["learning_rate"])
     scheduler = StepLR(optimizer, step_size=100, gamma=0.5)
 
-
     index_t0 = input_test[:,0] == 0
     index_left = input_test[:,1] == 0
     index_right = input_test[:,1] == 1
+    
     input_bc_left = input_test[index_left]
     input_bc_right = input_test[index_right]
     input_ic = input_test[index_t0]
-
+    
     T_0 = torch.Tensor(temperature_field[:,0]).to(device)
-    T_left = torch.Tensor(temperature_field[-1,1:]).to(device)
-    T_right = torch.Tensor(temperature_field[0,1:]).to(device)
-
-
-
+    T_left = torch.Tensor(temperature_field[-1,:]).to(device)
+    T_right = torch.Tensor(temperature_field[0,:]).to(device)
+    print(T_right.shape)
     # Training loop
     for epoch in range(hparam["epochs"]):
         training_loss = 0
@@ -169,22 +154,20 @@ def train_model():
             optimizer.zero_grad()
 
             # Forward pass
-            T_pred = model(input).to(device)
-            
+            T_pred = model(input).to(device)[:,0]
 
             # Boundary Conditions   
-            T_NN_0 = model(input_ic).to(device)
-            T_NN_left = model(input_bc_left).to(device)
-            T_NN_right = model(input_bc_right).to(device)
+            T_NN_0 = model(input_ic).to(device)[:,0]
+            T_NN_left = model(input_bc_left).to(device)[:,0]
+            T_NN_right = model(input_bc_right).to(device)[:,0]
 
-
-        
             input_test =  input_test[0]
-            #input_test.requires_grad = True
+
             input_test = input_test.to(device)
 
-            T_pred_physical = model(input_test).to(device)
+            output_test = model(input_test).to(device)
 
+            T_pred_physical, source_strength_pred = output_test[:,0], output_test[:,1]
             # Automatic differentiation
             dT = grad(T_pred_physical.sum(), input_test, retain_graph= True, create_graph=True)[0]
             T_x = dT[:,1]
@@ -194,8 +177,7 @@ def train_model():
             
             # Loss calculation
 
-            loss = loss_function(T_pred, output, T_t, T_xx, input_test[:,2],hparam,T_0,T_left,T_right,T_NN_0,T_NN_left,T_NN_right)
-
+            loss = loss_function(T_pred, output, T_t, T_xx, source_strength_pred,hparam,T_0,T_left,T_right,T_NN_0,T_NN_left,T_NN_right)
            
             
             # Backward pass
@@ -216,7 +198,7 @@ def train_model():
 
         # Forward pass
     torch.save(model.state_dict(), "heatPinn.pt")
-    test_data = create_test_data(x,t,source_strength,source_location).to(device)
+    test_data = create_test_data(x,t).to(device)
     return model, losses,test_data, temperature_field
 
 
@@ -224,11 +206,14 @@ def main():
     model, losses,test_data, T= train_model()
     model.eval()
     #ssplit the array at ever 50th row
-    T_pred = model(test_data)
+    output_pred = model(test_data)
+    T_pred = output_pred[:,0]
     T_pred = T_pred.detach().cpu().numpy()
     T_pred = T_pred.reshape(1000,100).T
-        
 
+    plt.figure()   
+    plt.imshow(output_pred[:,1].detach().cpu().numpy().reshape(1000,100).T)
+    plt.show()
 
     plt.figure()
     plt.plot(losses)
