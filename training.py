@@ -7,6 +7,7 @@ from torch.autograd import grad
 from torch.optim import Adam
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import DataLoader, TensorDataset
 
 import matplotlib.pyplot as plt
 
@@ -105,15 +106,24 @@ def loss_function(T_pred, output, T_t, T_xx, source_strength, hparam,T_0,T_left,
     return loss
 
 def train_model():
+    # setting the hyperparameters
+    hparam = {"learning_rate": 0.01,"epochs": 5, "weight_physical":0.01, "weight_data":3,
+              "weight_boundary":1,"weight_initial":1,"batch_size_physical": 200}
+    
     # Get the data and reshape it into the correct format. 
     x, t, temperature_field, sensor_data, sensor_location, source_location, source_strength = return_data()
     input, output = reshape_data(t,sensor_data, sensor_location,source_strength)
     input.requires_grad = True
     input = input.to(device)
     output = output.to(device)
+
+
     input_test = create_test_data(x,t,source_strength,source_location)
     input_test.requires_grad = True
     input_test = input_test.to(device)
+    # Create torch dataset from the input_test data with no output
+    test_dataset = TensorDataset(input_test)
+    test_loader = DataLoader(test_dataset, batch_size=hparam["batch_size_physical"], shuffle=True)
 
 
     #val_input, val_output = reshape_val_data(x,t,temperature_field,source_strength,source_location)
@@ -127,8 +137,8 @@ def train_model():
     path = os.path.join(path, f'run_{num_of_runs + 1}')
     tb_logger = SummaryWriter(path)
     
-    # setting the hyperparameters
-    hparam = {"learning_rate": 0.001,"epochs": 700, "weight_physical":0.01, "weight_data":2,"weight_boundary":1,"weight_initial":1}
+    
+    
 
     losses = np.zeros(hparam["epochs"])
     # Get validation data by drawing random samples from the full temperature field
@@ -136,56 +146,72 @@ def train_model():
     # Instantiate the model, optimizer, data loaders and loss function
     model = Net(hparam).to(device)
     optimizer = Adam(model.parameters(), lr=hparam["learning_rate"])
-    scheduler = StepLR(optimizer, step_size=1000, gamma=1)
+    scheduler = StepLR(optimizer, step_size=100, gamma=0.5)
 
 
     index_t0 = input_test[:,0] == 0
     index_left = input_test[:,1] == 0
     index_right = input_test[:,1] == 1
+    input_bc_left = input_test[index_left]
+    input_bc_right = input_test[index_right]
+    input_ic = input_test[index_t0]
 
     T_0 = torch.Tensor(temperature_field[:,0]).to(device)
     T_left = torch.Tensor(temperature_field[-1,1:]).to(device)
     T_right = torch.Tensor(temperature_field[0,1:]).to(device)
 
+
+
     # Training loop
     for epoch in range(hparam["epochs"]):
         training_loss = 0
+        for batch_idx, input_test in enumerate(test_loader):
+            optimizer.zero_grad()
+
+            # Forward pass
+            T_pred = model(input).to(device)
+            
+
+            # Boundary Conditions   
+            T_NN_0 = model(input_ic).to(device)
+            T_NN_left = model(input_bc_left).to(device)
+            T_NN_right = model(input_bc_right).to(device)
+
+
         
-        # Forward pass
-        T_pred = model(input).to(device)
-        T_pred_physical = model(input_test).to(device)
+            input_test =  input_test[0]
+            #input_test.requires_grad = True
+            input_test = input_test.to(device)
 
-        # Boundary Conditions   
-        T_NN_0 = T_pred_physical[index_t0]
-        T_NN_left = T_pred_physical[index_left][1:]
-        T_NN_right = T_pred_physical[index_right][1:]
- 
-        # Automatic differentiation
-        dT = grad(T_pred_physical.sum(), input_test, create_graph=True)[0]
-        T_x = dT[:,1]
-        T_t = dT[:,0]
-        T_xx = grad(T_x, input_test,grad_outputs= torch.ones((100000)).to(device), create_graph=True)[0][:,1]
+            T_pred_physical = model(input_test).to(device)
+
+            # Automatic differentiation
+            dT = grad(T_pred_physical.sum(), input_test, retain_graph= True, create_graph=True)[0]
+            T_x = dT[:,1]
+            T_t = dT[:,0]
+            T_xx = grad(T_x, input_test,grad_outputs= torch.ones((hparam["batch_size_physical"])).to(device), retain_graph=True, create_graph=True)[0][:,1]
         
-        optimizer.zero_grad()
-        # Loss calculation
+            
+            # Loss calculation
 
-        loss = loss_function(T_pred, output, T_t, T_xx, input_test[:,2],hparam,T_0,T_left,T_right,T_NN_0,T_NN_left,T_NN_right)
+            loss = loss_function(T_pred, output, T_t, T_xx, input_test[:,2],hparam,T_0,T_left,T_right,T_NN_0,T_NN_left,T_NN_right)
 
-        #trainig_loss += loss.item()
-
-        # Logging
-        tb_logger.add_scalar('train_loss', loss.item(), epoch)
-        # Backward pass
-        loss.backward()
-        # Update parameters
-        optimizer.step()
-        scheduler.step()
-        
-        losses[epoch - 1] = loss.detach().cpu().numpy()
+           
+            
+            # Backward pass
+            loss.backward(retain_graph=True)
+            # Update parameters
+            optimizer.step()
+            scheduler.step()
+             # Logging
+            training_loss += loss.item()
+            tb_logger.add_scalar('train_loss', loss.item(), epoch * len(test_loader) + batch_idx)
+            
+        losses[epoch] = training_loss/len(test_loader)
         # Validation
         #T_val = model(val_input)
         if epoch % 100 == 0:
-            print("Epoch: %d, Loss: %.7f" % (epoch, losses[epoch - 1]))
+            print("Epoch: %d, Loss: %.7f" % (epoch, losses[epoch]))
 
 
         # Forward pass
@@ -214,11 +240,13 @@ def main():
 
     plt.title("Predicted Temperature Field")
     plt.imshow(T_pred, cmap='hot', interpolation='nearest',aspect='auto')
+    plt.colorbar()
 
 
     plt.figure()
     plt.title("True Temperature Field")
     plt.imshow(T, cmap='hot', interpolation='nearest', aspect='auto')
+    plt.colorbar()
     plt.show()
   
 

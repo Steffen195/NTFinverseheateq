@@ -116,7 +116,7 @@ def return_data():
 
     
     #Select every fifth entry in the x array
-    sensor_location = x[::25]
+    sensor_location = x[::10]
     sensor_location_index = [int(np.floor(i * len(x)))
                              for i in sensor_location]
 
