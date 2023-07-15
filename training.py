@@ -1,218 +1,211 @@
 import os
-from heateqsim import return_data
 import numpy as np
 import torch
 from model.network import Net
 from torch.autograd import grad
-from torch.optim import Adam
+from torch.optim import Adam, LBFGS
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader, TensorDataset
-
 import matplotlib.pyplot as plt
+from temperature_sim import Grid, Source, HeatEqSimulation
+
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print('You are using the following device: ', device)
 
-def create_test_data(x,t):
+ # setting up the tensorboard logger
+path = os.path.join('logs', 'Case_0')
+num_of_runs = len(os.listdir(path)) if os.path.exists(path) else 0
+path = os.path.join(path, f'run_{num_of_runs + 1}')
+tb_logger = SummaryWriter(path)
 
-    input_test = np.array(np.meshgrid(t,x)).T.reshape(-1,2)
-    input_test = torch.Tensor(input_test)
+def create_full_domain_input_data(grid):
+    """
+    Creates an array that contains all combinations of time and space coordinates.
+    """
+    full_domain_input = np.array(np.meshgrid(grid.t, grid.x)).T.reshape(-1,2)
+    full_domain_input = torch.Tensor(full_domain_input)
+    return full_domain_input
 
-    return input_test
 
-
-def reshape_data(t,sensor_data, sensor_location,source_strength,source_location):
+def create_sensor_data(sim :HeatEqSimulation):
     # Input is an array with N_sensors*timesteps rows and 2 columns (time and sensor location)
-    # Output is an array with N_sensors*timesteps rows and 1 column (sensor temperature data)
+    # Output is an array with N_sensors*timesteps rows and 2 column (sensor temperature data and source)
 
-    input = None
-    output = None
-    source_strength = source_strength.reshape(len(source_strength),1)
-    number_of_sensors = len(sensor_location)
+
+    sensor_input = None
+    sensor_output = None
+
     
-    timesteps = len(t)
-    t = t.reshape(timesteps,1)
-    for i in range(number_of_sensors):
-        #Concatenation of time and sensor location into one input array
-        x_sensor = sensor_location[i]*np.ones(timesteps)
-        x_sensor = x_sensor.reshape(timesteps,1)
 
-        arr = np.hstack((t, x_sensor))
+    for i in range(sim.number_of_sensors):
+        #Concatenation of time and sensor location into one sensor_input array
+        x_sensor = sim.sensor_location[i]*np.ones(sim.grid.temporal_gridpoints)
+        x_sensor = x_sensor.reshape(sim.grid.temporal_gridpoints,1)
 
-        if input is None:
-            input = arr
+        arr = np.hstack((sim.grid.t.reshape(sim.grid.temporal_gridpoints,1), x_sensor))
+
+        if sensor_input is None:
+            sensor_input = arr
         else:
-            input = np.vstack((input, arr))
+            sensor_input = np.vstack((sensor_input, arr))
 
-        if sensor_location[i] == source_location:
-            source = source_strength
+        source = sim.source.source_field[np.argwhere(sim.grid.x == sim.sensor_location[i]),:].reshape(sim.grid.temporal_gridpoints,1)
+
+        #Concatenation of sensor data into one sensor_output array
+        sensor_data = sim.sensor_data[i,:].reshape(sim.grid.temporal_gridpoints,1)
+        sensor_data = np.hstack((sensor_data, source))
+        if sensor_output is None:
+            sensor_output = sensor_data
         else:
-            source = np.zeros_like(t)
+            sensor_output = np.vstack((sensor_output, sensor_data))
 
-        #Concatenation of sensor data into one output array
-        data = sensor_data[i,:].reshape(timesteps,1)
-        data = np.hstack((data, source))
-        if output is None:
-            output = data
-        else:
-            output = np.vstack((output, data))
+    sensor_input = torch.Tensor(sensor_input)
+    sensor_output = torch.Tensor(sensor_output)
+    return sensor_input, sensor_output
 
-
-    input = torch.Tensor(input)
-    output = torch.Tensor(output)
-    return input, output
-
-def reshape_val_data(x,t,temperature_field,source_strength,source_location):
-    val_ratio = 0.2
-    val_number = int(len(x)*len(t)*val_ratio)
-    x_val = np.random.choice(x, val_number).reshape(val_number,1)
-    t_val = np.random.choice(t, val_number).reshape(val_number,1)
-    val_source = np.zeros_like(x_val)
-    for i in range(len(x_val)-1):
-        if x_val[i] == source_location:
-            val_source[i] = source_strength(np.where(t==t_val[i]))
-        else: 
-            val_source[i] = 0.0
-
-    val_input = np.hstack((t_val, x_val, val_source))
-
-    val_output = temperature_field[np.where(x==x_val), np.where(t==t_val)]
-
-    return val_input, val_output
-
-def loss_function(T_pred, output, T_t, T_xx, source_strength, hparam,T_0,T_left,T_right,T_NN_0,T_NN_left,T_NN_right):
+def loss_function(T_pred, output, T_t, T_xx, source_strength_pred, hparam,T_0,T_left,T_right,T_NN_0,T_NN_left,T_NN_right,sim,epoch,batch_idx):
+    
     # Physical Loss
-    physical_loss = torch.mean((T_t - 0.05*T_xx - source_strength)**2)
+    physical_loss = hparam["weight_physical"]*torch.mean((T_t - sim.conductivity*T_xx - source_strength_pred)**2)
 
     # Data Loss
-    data_loss = torch.mean((T_pred - output[:,0])**2)
+    data_loss = hparam["weight_data"]*torch.mean((T_pred - output[:,0])**2)
 
-    initial_loss = torch.mean((T_0 - T_NN_0)**2)
+    initial_loss = hparam["weight_initial"]*torch.mean((T_0 - T_NN_0)**2)
 
-    boundary_loss = torch.mean(((T_left - T_NN_left) + (T_right-T_NN_right))**2)
+    boundary_loss = hparam["weight_boundary"]*torch.mean(((T_left - T_NN_left) + (T_right-T_NN_right))**2)
 
+    current_learning_step = epoch * hparam["data_loader_length"] + batch_idx
     # Total Loss
-    loss = hparam["weight_data"]*data_loss+hparam["weight_physical"]*physical_loss + hparam["weight_boundary"]*boundary_loss + hparam["weight_initial"]*initial_loss
+    tb_logger.add_scalar('Loss/Physical', physical_loss, current_learning_step)
+    tb_logger.add_scalar('Loss/Data', data_loss, current_learning_step)
+    tb_logger.add_scalar('Loss/Initial', initial_loss, current_learning_step)
+    tb_logger.add_scalar('Loss/Boundary', boundary_loss, current_learning_step) 
+
+    loss = data_loss+physical_loss + boundary_loss + initial_loss
+    
     return loss
 
-def train_model():
+
+def train_model(sim :HeatEqSimulation):
     # setting the hyperparameters
-    hparam = {"learning_rate": 0.01,"epochs": 5, "weight_physical":0.1, "weight_data":3,
+    hparam = {"learning_rate": 0.0001,"epochs": 20, "weight_physical":1, "weight_data":3,
               "weight_boundary":1,"weight_initial":1,"batch_size_physical": 200}
     
     # Get the data and reshape it into the correct format. 
-    x, t, temperature_field, sensor_data, sensor_location, source_location, source_strength = return_data()
-    input, output = reshape_data(t,sensor_data, sensor_location,source_strength,source_location)
-    input.requires_grad = True
-    input = input.to(device)
-    output = output.to(device)
+    sensor_input, sensor_output = create_sensor_data(sim)
+    sensor_input.requires_grad = True
+    sensor_input = sensor_input.to(device)
+    sensor_output = sensor_output.to(device)
 
+    full_domain_input = create_full_domain_input_data(sim.grid)
+    full_domain_input.requires_grad = True
+    full_domain_input = full_domain_input.to(device)
 
-    input_test = create_test_data(x,t)
-    input_test.requires_grad = True
-    input_test = input_test.to(device)
-    # Create torch dataset from the input_test data with no output
-    test_dataset = TensorDataset(input_test)
+    # Create torch dataset from the full_domain_input data with no output
+    test_dataset = TensorDataset(full_domain_input)
     test_loader = DataLoader(test_dataset, batch_size=hparam["batch_size_physical"], shuffle=True)
-
-
-    #val_input, val_output = reshape_val_data(x,t,temperature_field,source_strength,source_location)
+    hparam["data_loader_length"] = len(test_loader)
     # setting a seed for pytorch as well as one for numpy
     torch.manual_seed(2)
     np.random.seed(2)
 
-    # setting up the tensorboard logger
-    path = os.path.join('logs', 'Case_0')
-    num_of_runs = len(os.listdir(path)) if os.path.exists(path) else 0
-    path = os.path.join(path, f'run_{num_of_runs + 1}')
-    tb_logger = SummaryWriter(path)
+   
     
     losses = np.zeros(hparam["epochs"])
 
     # Instantiate the model, optimizer, data loaders and loss function
     model = Net(hparam).to(device)
     optimizer = Adam(model.parameters(), lr=hparam["learning_rate"])
-    scheduler = StepLR(optimizer, step_size=100, gamma=0.5)
+    scheduler = StepLR(optimizer, step_size=5000, gamma=0.5)
 
-    index_t0 = input_test[:,0] == 0
-    index_left = input_test[:,1] == 0
-    index_right = input_test[:,1] == 1
+    index_t0 = full_domain_input[:,0] == 0
+    index_left = full_domain_input[:,1] == 0
+    index_right = full_domain_input[:,1] == 1
     
-    input_bc_left = input_test[index_left]
-    input_bc_right = input_test[index_right]
-    input_ic = input_test[index_t0]
-    
-    T_0 = torch.Tensor(temperature_field[:,0]).to(device)
-    T_left = torch.Tensor(temperature_field[-1,:]).to(device)
-    T_right = torch.Tensor(temperature_field[0,:]).to(device)
-    print(T_right.shape)
+    input_bc_left = full_domain_input[index_left]
+    input_bc_right = full_domain_input[index_right]
+    input_ic = full_domain_input[index_t0]
+
+    T_0 = torch.Tensor(sim.temperature_field[:,0]).to(device)
+    T_left = torch.Tensor(sim.temperature_field[-1,:]).to(device)
+    T_right = torch.Tensor(sim.temperature_field[0,:]).to(device)
+
     # Training loop
     for epoch in range(hparam["epochs"]):
         training_loss = 0
-        for batch_idx, input_test in enumerate(test_loader):
+        for batch_idx, full_domain_input in enumerate(test_loader):
             optimizer.zero_grad()
 
             # Forward pass
-            T_pred = model(input).to(device)[:,0]
+            T_pred = model(sensor_input).to(device)[:,0]
 
             # Boundary Conditions   
             T_NN_0 = model(input_ic).to(device)[:,0]
             T_NN_left = model(input_bc_left).to(device)[:,0]
             T_NN_right = model(input_bc_right).to(device)[:,0]
 
-            input_test =  input_test[0]
+            #Take the data from tensor list
+            full_domain_input =  full_domain_input[0] 
+            full_domain_input = full_domain_input.to(device)
 
-            input_test = input_test.to(device)
+            full_domain_output = model(full_domain_input).to(device)
 
-            output_test = model(input_test).to(device)
-
-            T_pred_physical, source_strength_pred = output_test[:,0], output_test[:,1]
+            T_pred_physical, source_strength_pred = full_domain_output[:,0], full_domain_output[:,1]
+           
             # Automatic differentiation
-            dT = grad(T_pred_physical.sum(), input_test, retain_graph= True, create_graph=True)[0]
+            dT = grad(T_pred_physical.sum(), full_domain_input, retain_graph= True, create_graph=True)[0]
             T_x = dT[:,1]
             T_t = dT[:,0]
-            T_xx = grad(T_x, input_test,grad_outputs= torch.ones((hparam["batch_size_physical"])).to(device), retain_graph=True, create_graph=True)[0][:,1]
+            T_xx = grad(T_x, full_domain_input,grad_outputs= torch.ones((hparam["batch_size_physical"])).to(device), retain_graph=True, create_graph=True)[0][:,1]
         
-            
             # Loss calculation
-
-            loss = loss_function(T_pred, output, T_t, T_xx, source_strength_pred,hparam,T_0,T_left,T_right,T_NN_0,T_NN_left,T_NN_right)
+            loss = loss_function(T_pred, sensor_output, T_t, T_xx, source_strength_pred, hparam, T_0, T_left, T_right, T_NN_0, T_NN_left, T_NN_right,sim,epoch,batch_idx)
            
-            
             # Backward pass
             loss.backward(retain_graph=True)
+
             # Update parameters
             optimizer.step()
             scheduler.step()
+
              # Logging
             training_loss += loss.item()
             tb_logger.add_scalar('train_loss', loss.item(), epoch * len(test_loader) + batch_idx)
             
         losses[epoch] = training_loss/len(test_loader)
-        # Validation
-        #T_val = model(val_input)
-        if epoch % 100 == 0:
+
+        if epoch % 1 == 0:
             print("Epoch: %d, Loss: %.7f" % (epoch, losses[epoch]))
 
 
-        # Forward pass
+    # Forward pass
     torch.save(model.state_dict(), "heatPinn.pt")
-    test_data = create_test_data(x,t).to(device)
-    return model, losses,test_data, temperature_field
+    
+    return model, losses
 
 
 def main():
-    model, losses,test_data, T= train_model()
+    grid = Grid(spatial_gridpoints=100,temporal_gridpoints=1000)
+    source = Source.from_single_location(grid, strength_value= 100)
+    sim = HeatEqSimulation(source, grid)
+    model, losses = train_model(sim)
+
+    full_domain_test_data = create_full_domain_input_data(sim.grid).to(device)
     model.eval()
     #ssplit the array at ever 50th row
-    output_pred = model(test_data)
+    output_pred = model(full_domain_test_data)
     T_pred = output_pred[:,0]
     T_pred = T_pred.detach().cpu().numpy()
-    T_pred = T_pred.reshape(1000,100).T
+    T_pred = T_pred.reshape(sim.grid.temporal_gridpoints,sim.grid.spatial_gridpoints).T
 
+
+    source_prediction = output_pred[:,1].detach().cpu().numpy().reshape(sim.grid.temporal_gridpoints,sim.grid.spatial_gridpoints).T
     plt.figure()   
-    plt.imshow(output_pred[:,1].detach().cpu().numpy().reshape(1000,100).T)
+    plt.imshow(source_prediction)
     plt.show()
 
     plt.figure()
@@ -230,7 +223,7 @@ def main():
 
     plt.figure()
     plt.title("True Temperature Field")
-    plt.imshow(T, cmap='hot', interpolation='nearest', aspect='auto')
+    plt.imshow(sim.temperature_field, cmap='hot', interpolation='nearest', aspect='auto')
     plt.colorbar()
     plt.show()
   
