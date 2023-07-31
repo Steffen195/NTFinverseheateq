@@ -1,11 +1,14 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from utils import plot_heat_map
+from utils import plot_heat_map, scale_temperature_field
 
 
 class Grid():
+    """
+    Grid class describes objects that contain the coordinate grid for the simulation. 1 spatial dimension + 1 temporal dimension.
+    """
 
-    def __init__(self,spatial_gridpoints=50,x_left = 0, x_right = 1,temporal_gridpoints = 500, t_initial = 0, t_final = 1) -> None:
+    def __init__(self,spatial_gridpoints=50,x_left = -1, x_right = 1,temporal_gridpoints = 500, t_initial = 0, t_final = 1) -> None:
         self.spatial_gridpoints = spatial_gridpoints
         self.x_left = x_left
         self.x_right = x_right
@@ -20,20 +23,44 @@ class Grid():
         self.t = np.linspace(self.t_initial, self.t_final, self.temporal_gridpoints)
         
 class Source():
+    """
+    Creates a source object that contains the source field with the same size as the given grid. 
+    Can be constructed from a single location or from a function using different classmethods.
+    """
     source_field : np.ndarray
     grid : Grid
 
-    def __init__(self,source_field,grid):
+    def __init__(self,source_field,grid,):
         self.grid = grid
         self.source_field = source_field 
+        self.ratio = self.calculate_ratio()
     @classmethod
-    def from_single_location(cls, grid: Grid,location= 0.5,strength_value = 1):
-        source_field = np.zeros((grid.spatial_gridpoints, grid.temporal_gridpoints))
+    def from_single_location(cls, grid: Grid,location= 1,strength_value = 1):
+        source_field = np.zeros((grid.temporal_gridpoints,grid.spatial_gridpoints))
         source_strength =  np.ones(grid.temporal_gridpoints) * strength_value
-        source_location_idx = int(np.floor(location / grid.dx))
-        source_field[source_location_idx,:] = source_strength
-
+        source_location_idx = int(np.floor(location / grid.dx)) # Wrong index due to new boundary condition
+        source_field[:,source_location_idx] = source_strength
+        
         return cls(source_field,grid)
+    
+    @classmethod
+    def from_function(cls, grid: Grid, function= lambda t,x : max(0.0,np.exp(-1/2 * ((x**2)/0.1)) * 1/np.sqrt(2*np.pi*0.1**2)),threshold = None):
+        t,x = np.meshgrid(grid.t,grid.x,indexing='ij')
+        vfunction = np.vectorize(function)
+        source_field = vfunction(t,x).reshape(grid.temporal_gridpoints,grid.spatial_gridpoints)  
+        if np.max(source_field) > 1:
+            source_field = source_field/np.max(source_field)
+
+        if threshold is not None:
+            source_field[source_field < threshold] = 0
+        return cls(source_field,grid)
+    
+    def calculate_ratio(self):
+        """
+        This function calculates the fraction of non-zero values in the source field
+        """
+        ratio = np.sum(self.source_field != 0) / (self.grid.temporal_gridpoints * self.grid.spatial_gridpoints)
+        return ratio
 
 
 class HeatEqSimulation():
@@ -42,7 +69,7 @@ class HeatEqSimulation():
     and a source term. The source strength is a function of time. 
     """
 
-    def __init__(self, source: Source, grid = Grid(), sensor_interval = 10, conductivity = 0.05, T_left = 5, T_right = 5, T_0 = 2):
+    def __init__(self, source: Source, grid = Grid(), sensor_interval = 10, conductivity = 0.05, T_left = 0.5, T_right = 0.5, T_0 = 0.2):
         
         self.source = source
         self.grid = grid
@@ -61,7 +88,7 @@ class HeatEqSimulation():
             raise ValueError("Source grid and domain grid do not match")
         
     def set_sensor_location(self,sensor_interval):
-        sensor_location = self.grid.x[::sensor_interval]
+        sensor_location = self.grid.x[sensor_interval::sensor_interval]
         number_of_sensors = len(sensor_location)
         return sensor_location, number_of_sensors  
         
@@ -83,10 +110,10 @@ class HeatEqSimulation():
         """
         This function initializes the temperature field
         """
-        temperature_field = np.zeros((self.grid.spatial_gridpoints, self.grid.temporal_gridpoints))
-        temperature_field[:, 0] = T_0
-        temperature_field[0, :] = T_left
-        temperature_field[-1, :] = T_right
+        temperature_field = np.zeros((self.grid.temporal_gridpoints,self.grid.spatial_gridpoints))
+        temperature_field[0, :] = T_0
+        temperature_field[:, 0] = T_left
+        temperature_field[:,-1] = T_right
 
         return temperature_field
     
@@ -102,9 +129,10 @@ class HeatEqSimulation():
         # Solve the heat equation for each time step
         for time_index in range(1, self.grid.temporal_gridpoints):
             b_vector = self.construct_b_vector(time_index)
-            T[:, time_index] = (identity + A) @ T[:, time_index-1] + b_vector
-
+            T[time_index,:] = (identity + A) @ T[time_index-1,:] + b_vector
+        T = scale_temperature_field(T)
         return T
+
 
 
     def construct_A_matrix(self):
@@ -132,24 +160,33 @@ class HeatEqSimulation():
         Using the time_index, the source_strength at that time is extracted and placed in the b_vector
         at the sensor_location.
         """
-        b_vector = self.source.source_field[:, time_index]
+        b_vector = self.source.source_field[time_index,:]
         return b_vector
     
     def return_sensor_data(self):
         """
         This function returns the sensor data at the sensor location
         """
-        sensor_data = self.temperature_field[::self.sensor_interval, :]
+        sensor_data = self.temperature_field[:,self.sensor_interval::self.sensor_interval]
         return sensor_data
         
 def main():
     # Define the grid
     grid = Grid()
     # Define the source
-    source = Source.from_single_location(grid)
+    # lambda function with zero mean gaussian 
+    
+    #source = Source.from_single_location(grid)
+    #function = lambda t,x : max([0.0,-3*x**2+0.3])
+    #function = lambda t,x : np.exp(-1/2 * (((x-np.sin(50/(2*np.pi)*t))**2)/0.1)) * 1/np.sqrt(2*np.pi*0.1**2)
+    source = Source.from_function(grid)#,function,threshold = 0.00)
+    print(source.ratio)
     # Define the simulation
     simulation = HeatEqSimulation(source, grid)
     plot_heat_map(simulation.grid.x,simulation.grid.t,simulation.temperature_field)
+    print(simulation.sensor_location)
+    plt.imshow(source.source_field)
+    plt.show()
 
 
 if __name__ == "__main__":
